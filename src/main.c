@@ -1,6 +1,12 @@
-/* main.c — 小雨超级文件批量改名专家 V1.0 正式版
+/* main.c — 小雨超级文件批量改名专家 V1.1 正式版
  * 主程序：界面、文件列表、改名规则、预览、执行、撤销、参数记忆
  * 纯 Win32 SDK + C，未使用 MFC
+ *
+ * V1.1 在 V1.0 基础上新增：
+ *   1、导入目录时可包含子文件夹（选择会记住）；
+ *   2、按拍摄日期编号（读取 JPEG 的 EXIF 拍摄时间）；
+ *   3、查找替换支持正则表达式；
+ *   4、改名方案（预设）保存与调用。
  */
 #ifndef UNICODE
 #define UNICODE
@@ -17,8 +23,12 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <wchar.h>
+#include <wctype.h>
 #include "resource.h"
 #include "app.h"
+#include "exif.h"
+#include "regex.h"
 
 /* ─────────────────────────── 全局变量 ─────────────────────────── */
 HINSTANCE g_hInst;
@@ -27,9 +37,11 @@ static HWND g_hGrpMode, g_hGrpParam;
 static HWND g_hRadMode[MODE_COUNT];
 static HWND g_hLblP1, g_hEdtP1, g_hLblStart, g_hEdtStart, g_hLblWidth, g_hCmbWidth;
 static HWND g_hLblPrefix, g_hEdtPrefix, g_hLblSuffix, g_hEdtSuffix;
-static HWND g_hLblFind, g_hEdtFind, g_hLblRepl, g_hEdtRepl, g_hChkCase;
+static HWND g_hLblFind, g_hEdtFind, g_hLblRepl, g_hEdtRepl, g_hChkCase, g_hChkRegex;
 static HWND g_hLblExt, g_hEdtExt, g_hLblExtWarn;
 static HWND g_hRadUpper, g_hRadLower, g_hChkExtCase;
+static HWND g_hLblDate, g_hEdtDate, g_hLblDateHint;
+static HWND g_hLblPreset, g_hCmbPreset, g_hBtnSavePreset, g_hBtnDelPreset;
 static HFONT g_hFont;
 static int   g_mode = MODE_NUMBER;
 static FileItem *g_items = NULL;
@@ -39,14 +51,16 @@ static WCHAR g_exeDir[MAX_PATH];
 static HWND  g_hProg = NULL;
 static int   g_cancel = 0;
 static HACCEL g_hAccel = NULL;
+static BOOL  g_subDir = FALSE;   /* 导入目录时是否包含子文件夹 */
 
 /* 列表列宽（96dpi 基准） */
 static const int g_colW[COL_COUNT] = { 200, 200, 60, 80, 120 };
 static const WCHAR *g_colName[COL_COUNT] = { L"原文件名", L"新文件名", L"扩展名", L"大小", L"修改日期" };
 
-/* 改名方式名称 */
+/* 改名方式名称（顺序必须与 app.h 中的 MODE_* 枚举一致） */
 static const WCHAR *g_modeName[MODE_COUNT] = {
-    L"统一编号", L"添加前后缀", L"查找替换", L"修改扩展名", L"全部替换", L"大小写转换"
+    L"统一编号", L"添加前后缀", L"查找替换", L"修改扩展名",
+    L"全部替换", L"大小写转换", L"按日期编号"
 };
 
 /* ─────────────────────────── 小工具 ─────────────────────────── */
@@ -204,6 +218,12 @@ static BOOL ListHasPath(const WCHAR *path)
     return FALSE;
 }
 
+static BOOL IsJpegFile(const WCHAR *ext)
+{
+    return NameCmpI(ext, L"jpg") == 0 || NameCmpI(ext, L"jpeg") == 0 ||
+           NameCmpI(ext, L"jpe") == 0;
+}
+
 static BOOL AddFileItem(const WCHAR *path)
 {
     if (ListHasPath(path)) return FALSE;
@@ -227,27 +247,77 @@ static BOOL AddFileItem(const WCHAR *path)
     it->mtime = fad.ftLastWriteTime;
     it->status = 0;
     lstrcpynW(it->newname, it->base, MAX_PATH);
+
+    /* 拍摄日期：JPEG 先读 EXIF，读不到就用文件修改时间，绝不报错。 */
+    it->hasTaken = 0;
+    if (IsJpegFile(it->ext) && ExifReadDateTime(path, &it->taken)) {
+        it->hasTaken = 1;
+    } else {
+        FILETIME lt;
+        FileTimeToLocalFileTime(&fad.ftLastWriteTime, &lt);
+        FileTimeToSystemTime(&lt, &it->taken);
+    }
+
     g_count++;
     return TRUE;
 }
 
-/* 把目录下的文件（不含子目录）加入列表 */
-static int AddDirectoryItems(const WCHAR *dir)
+/* 目录里是否还有下一级子目录（跳过 . 与 ..） */
+static BOOL HasSubDir(const WCHAR *dir)
+{
+    WCHAR pat[MAX_PATH];
+    WIN32_FIND_DATAW fd;
+    swprintf(pat, MAX_PATH, L"%ls\\*", dir);
+    HANDLE h = FindFirstFileW(pat, &fd);
+    if (h == INVALID_HANDLE_VALUE) return FALSE;
+    BOOL found = FALSE;
+    do {
+        if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) continue;
+        if (wcscmp(fd.cFileName, L".") == 0 || wcscmp(fd.cFileName, L"..") == 0) continue;
+        found = TRUE;
+        break;
+    } while (FindNextFileW(h, &fd));
+    FindClose(h);
+    return found;
+}
+
+/* 把目录下的文件加入列表；recursive 为真时递归子文件夹。
+ * depth 是递归深度上限，防止目录环或超深目录把程序拖死。 */
+#define MAX_DIR_DEPTH 32
+static int AddDirectoryItemsEx(const WCHAR *dir, BOOL recursive, int depth)
 {
     WCHAR pat[MAX_PATH];
     WIN32_FIND_DATAW fd;
     int added = 0;
+
+    if (depth > MAX_DIR_DEPTH) return 0;
+    if (lstrlenW(dir) + 3 >= MAX_PATH) return 0;
     swprintf(pat, MAX_PATH, L"%ls\\*", dir);
     HANDLE h = FindFirstFileW(pat, &fd);
     if (h == INVALID_HANDLE_VALUE) return 0;
+
     do {
-        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+        if (wcscmp(fd.cFileName, L".") == 0 || wcscmp(fd.cFileName, L"..") == 0) continue;
         WCHAR full[MAX_PATH];
+        if (lstrlenW(dir) + 1 + lstrlenW(fd.cFileName) >= MAX_PATH) continue;  /* 路径过长，跳过 */
         swprintf(full, MAX_PATH, L"%ls\\%ls", dir, fd.cFileName);
-        if (AddFileItem(full)) added++;
+
+        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+            if (!recursive) continue;
+            /* 不跟随符号链接 / 目录联接，避免无限递归 */
+            if (fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) continue;
+            added += AddDirectoryItemsEx(full, recursive, depth + 1);
+        } else {
+            if (AddFileItem(full)) added++;
+        }
     } while (FindNextFileW(h, &fd));
     FindClose(h);
     return added;
+}
+
+static int AddDirectoryItems(const WCHAR *dir, BOOL recursive)
+{
+    return AddDirectoryItemsEx(dir, recursive, 0);
 }
 
 /* ─────────────────────────── 预览计算 ─────────────────────────── */
@@ -257,6 +327,61 @@ static int GetEditInt(HWND h, int def)
     GetWindowTextW(h, buf, 64);
     if (!buf[0]) return def;
     return _wtoi(buf);
+}
+
+/* 把一段字符串追加到缓冲区（自动限长） */
+static void AppStr(WCHAR *out, int cap, int *oi, const WCHAR *s)
+{
+    int n = lstrlenW(s);
+    if (*oi + n > cap - 1) n = cap - 1 - *oi;
+    if (n > 0) { memcpy(out + *oi, s, n * sizeof(WCHAR)); *oi += n; }
+    out[*oi] = 0;
+}
+
+static void AppNum(WCHAR *out, int cap, int *oi, const WCHAR *fmt, int v)
+{
+    WCHAR tmp[24];
+    swprintf(tmp, 24, fmt, v);
+    AppStr(out, cap, oi, tmp);
+}
+
+/* 按用户给出的格式串拼日期。
+ * 可用标记：yyyy 年、yy 年（两位）、mm 月、dd 日、hh 时、nn 分、ss 秒，
+ * 其余字符原样保留（例如 - 或 _）。格式串为空时默认 yyyy-mm-dd。 */
+static void FormatDateByPattern(const SYSTEMTIME *st, const WCHAR *pat, WCHAR *out, int cap)
+{
+    if (!pat || !pat[0]) pat = L"yyyy-mm-dd";
+    int oi = 0;
+    out[0] = 0;
+
+    for (const WCHAR *p = pat; *p; ) {
+        int rem = lstrlenW(p);
+        WCHAR c0 = (WCHAR)towlower(p[0]);
+        WCHAR c1 = (rem > 1) ? (WCHAR)towlower(p[1]) : 0;
+        WCHAR c2 = (rem > 2) ? (WCHAR)towlower(p[2]) : 0;
+        WCHAR c3 = (rem > 3) ? (WCHAR)towlower(p[3]) : 0;
+
+        if (rem >= 4 && c0 == L'y' && c1 == L'y' && c2 == L'y' && c3 == L'y') {
+            AppNum(out, cap, &oi, L"%04d", st->wYear); p += 4;
+        } else if (rem >= 2 && c0 == L'y' && c1 == L'y') {
+            AppNum(out, cap, &oi, L"%02d", st->wYear % 100); p += 2;
+        } else if (rem >= 2 && c0 == L'm' && c1 == L'm') {
+            AppNum(out, cap, &oi, L"%02d", st->wMonth); p += 2;
+        } else if (rem >= 2 && c0 == L'd' && c1 == L'd') {
+            AppNum(out, cap, &oi, L"%02d", st->wDay); p += 2;
+        } else if (rem >= 2 && c0 == L'h' && c1 == L'h') {
+            AppNum(out, cap, &oi, L"%02d", st->wHour); p += 2;
+        } else if (rem >= 2 && ((c0 == L'n' && c1 == L'n') || (c0 == L'm' && c1 == L'i'))) {
+            AppNum(out, cap, &oi, L"%02d", st->wMinute); p += 2;
+        } else if (rem >= 2 && c0 == L's' && c1 == L's') {
+            AppNum(out, cap, &oi, L"%02d", st->wSecond); p += 2;
+        } else {
+            WCHAR one[2];
+            one[0] = *p++;
+            one[1] = 0;
+            AppStr(out, cap, &oi, one);
+        }
+    }
 }
 
 /* 预览用的重名排序比较：先目录后新文件名（均忽略大小写） */
@@ -272,8 +397,9 @@ static void ComputePreview(void)
 {
     WCHAR p1[512] = L"", prefix[512] = L"", suffix[512] = L"";
     WCHAR find[512] = L"", repl[512] = L"", newext[128] = L"";
+    WCHAR dateFmt[128] = L"";
     int start = 1, width = 3;
-    BOOL caseSensitive = FALSE, extCase = FALSE, toUpper = TRUE;
+    BOOL caseSensitive = FALSE, extCase = FALSE, toUpper = TRUE, useRegex = FALSE;
 
     GetWindowTextW(g_hEdtP1, p1, 512);
     GetWindowTextW(g_hEdtPrefix, prefix, 512);
@@ -281,6 +407,7 @@ static void ComputePreview(void)
     GetWindowTextW(g_hEdtFind, find, 512);
     GetWindowTextW(g_hEdtRepl, repl, 512);
     GetWindowTextW(g_hEdtExt, newext, 128);
+    GetWindowTextW(g_hEdtDate, dateFmt, 128);
     start = GetEditInt(g_hEdtStart, 1);
     width = GetEditInt(g_hCmbWidth, 3);
     if (width < 1) width = 1;
@@ -288,11 +415,21 @@ static void ComputePreview(void)
     caseSensitive = (SendMessageW(g_hChkCase, BM_GETCHECK, 0, 0) == BST_CHECKED);
     extCase = (SendMessageW(g_hChkExtCase, BM_GETCHECK, 0, 0) == BST_CHECKED);
     toUpper = (SendMessageW(g_hRadUpper, BM_GETCHECK, 0, 0) == BST_CHECKED);
+    useRegex = (SendMessageW(g_hChkRegex, BM_GETCHECK, 0, 0) == BST_CHECKED);
 
     /* 去掉扩展名输入里可能带的点号 */
     WCHAR *ne = newext;
     while (*ne == L'.') ne++;
     if (ne != newext) lstrcpynW(newext, ne, 128);
+
+    /* 正则表达式只编译一次，供全部文件共用 */
+    Regex *re = NULL;
+    BOOL regexBad = FALSE;
+    WCHAR regexErr[256] = L"";
+    if (g_mode == MODE_REPLACE && useRegex && find[0]) {
+        re = RegexCompile(find, caseSensitive, regexErr, 256);
+        if (!re) regexBad = TRUE;
+    }
 
     int idx = 0;
     for (int i = 0; i < g_count; i++) {
@@ -314,7 +451,13 @@ static void ComputePreview(void)
             swprintf(nm, MAX_PATH, L"%ls%ls%ls", prefix, it->base, suffix);
             break;
         case MODE_REPLACE:
-            ReplaceAll(it->base, find, repl, caseSensitive, nm, MAX_PATH);
+            if (useRegex) {
+                if (re) RegexReplaceWith(re, it->base, repl, nm, MAX_PATH);
+                else if (!find[0]) lstrcpynW(nm, it->base, MAX_PATH);  /* 空表达式：不改名 */
+                else nm[0] = 0;
+            } else {
+                ReplaceAll(it->base, find, repl, caseSensitive, nm, MAX_PATH);
+            }
             break;
         case MODE_EXT:
             lstrcpynW(nm, it->base, MAX_PATH);
@@ -324,6 +467,14 @@ static void ComputePreview(void)
             lstrcpynW(nm, it->base, MAX_PATH);
             if (toUpper) CharUpperW(nm); else CharLowerW(nm);
             if (extCase) { if (toUpper) CharUpperW(newExt); else CharLowerW(newExt); }
+            break;
+        }
+        case MODE_DATE: {
+            WCHAR num[64], dstr[128];
+            FormatDateByPattern(&it->taken, dateFmt, dstr, 128);
+            swprintf(num, 64, L"%0*d", width, start + idx);
+            if (p1[0]) swprintf(nm, MAX_PATH, L"%ls_%ls_%ls", p1, dstr, num);
+            else       swprintf(nm, MAX_PATH, L"%ls_%ls", dstr, num);
             break;
         }
         }
@@ -346,6 +497,8 @@ static void ComputePreview(void)
         if (it->newname[0] == 0 || HasIllegalChar(it->newname) || HasIllegalChar(nm))
             it->status = 1;
     }
+
+    if (re) RegexFree(re);
 
     /* 重名检查（同一目录内，忽略大小写）
        先按“目录 + 新文件名”排序，再比较相邻项，避免大量文件时成平方级耗时 */
@@ -375,6 +528,15 @@ static void ComputePreview(void)
         if (GetFileAttributesW(target) != INVALID_FILE_ATTRIBUTES && !ListHasPath(target))
             g_items[i].status = 1;
     }
+
+    /* 正则表达式有误时，在状态栏里说明原因，方便用户改正 */
+    if (regexBad) {
+        WCHAR sb[320];
+        swprintf(sb, 320, L"正则表达式有误：%ls", regexErr);
+        StatusSet(0, sb);
+    } else {
+        StatusSet(0, L"就绪");
+    }
 }
 
 /* ─────────────────────────── 列表显示 ─────────────────────────── */
@@ -395,6 +557,12 @@ static void FormatTime(const FILETIME *ft, WCHAR *out)
              st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute);
 }
 
+static void FormatSystemTime(const SYSTEMTIME *st, WCHAR *out)
+{
+    swprintf(out, 32, L"%04d-%02d-%02d %02d:%02d",
+             st->wYear, st->wMonth, st->wDay, st->wHour, st->wMinute);
+}
+
 static void OrigName(const FileItem *it, WCHAR *out)
 {
     if (it->ext[0]) swprintf(out, MAX_PATH, L"%ls.%ls", it->base, it->ext);
@@ -406,12 +574,20 @@ static void RefreshList(void)
     SendMessageW(g_hList, WM_SETREDRAW, FALSE, 0);
     ListView_DeleteAllItems(g_hList);
 
+    /* 日期列在“按日期编号”方式下显示的是拍摄日期，标题也跟着变 */
+    LVCOLUMNW hdr;
+    ZeroMemory(&hdr, sizeof(hdr));
+    hdr.mask = LVCF_TEXT;
+    hdr.pszText = (g_mode == MODE_DATE) ? L"拍摄/修改日期" : L"修改日期";
+    ListView_SetColumn(g_hList, COL_TIME, &hdr);
+
     for (int i = 0; i < g_count; i++) {
         FileItem *it = &g_items[i];
         WCHAR orig[MAX_PATH], size[32], time[32];
         OrigName(it, orig);
         FormatSize(it->size, size);
-        FormatTime(&it->mtime, time);
+        if (g_mode == MODE_DATE) FormatSystemTime(&it->taken, time);
+        else                     FormatTime(&it->mtime, time);
 
         LVITEMW lvi;
         ZeroMemory(&lvi, sizeof(lvi));
@@ -507,6 +683,36 @@ static void DoAddFiles(void)
                                 L"小雨超级文件批量改名专家", MB_OK | MB_ICONINFORMATION);
 }
 
+/* 勾选 / 取消“添加目录时包含子文件夹”菜单项 */
+static void UpdateSubDirMenu(void)
+{
+    HMENU mb = GetMenu(g_hMain);
+    if (!mb) return;
+    HMENU mf = GetSubMenu(mb, 0);
+    if (!mf) return;
+    CheckMenuItem(mf, IDM_FILE_SUBDIR,
+                  MF_BYCOMMAND | (g_subDir ? MF_CHECKED : MF_UNCHECKED));
+}
+
+/* 目录里还有子文件夹、而当前没有开启“包含子文件夹”时，问一次。
+ * 用户选择“是”就记住这个选择（存进 rename.ini，下次沿用）。 */
+static BOOL AskSubDirOnce(BOOL *asked)
+{
+    if (g_subDir || *asked) return g_subDir;
+    *asked = TRUE;
+    int r = MessageBoxW(g_hMain,
+        L"该文件夹中还包含子文件夹。\n\n"
+        L"是否连同子文件夹中的文件一并导入？\n\n"
+        L"（选择“是”后本软件会记住这个选择，"
+        L"也可以随时在“文件”菜单中更改。）",
+        APP_NAME, MB_YESNO | MB_ICONQUESTION);
+    if (r == IDYES) {
+        g_subDir = TRUE;
+        UpdateSubDirMenu();
+    }
+    return g_subDir;
+}
+
 static void DoAddDir(void)
 {
     BROWSEINFOW bi;
@@ -519,7 +725,12 @@ static void DoAddDir(void)
     if (!pidl) return;
     WCHAR dir[MAX_PATH];
     if (SHGetPathFromIDListW(pidl, dir)) {
-        int added = AddDirectoryItems(dir);
+        BOOL recursive = g_subDir;
+        if (!recursive && HasSubDir(dir)) {
+            BOOL asked = FALSE;
+            recursive = AskSubDirOnce(&asked);
+        }
+        int added = AddDirectoryItems(dir, recursive);
         UpdatePreviewAndList();
         if (added == 0)
             MessageBoxW(g_hMain, L"该文件夹中没有找到文件。", L"小雨超级文件批量改名专家",
@@ -866,6 +1077,7 @@ static void CreateMenuBar(HWND h)
     m = CreatePopupMenu();
     AppendMenuW(m, MF_STRING, IDM_FILE_ADDFILES, L"添加文件(&F)...\tCtrl+A");
     AppendMenuW(m, MF_STRING, IDM_FILE_ADDDIR,   L"添加目录(&D)...\tCtrl+D");
+    AppendMenuW(m, MF_STRING, IDM_FILE_SUBDIR,   L"添加目录时包含子文件夹(&S)");
     AppendMenuW(m, MF_SEPARATOR, 0, NULL);
     AppendMenuW(m, MF_STRING, IDM_FILE_EXIT,     L"退出(&X)\tAlt+F4");
     AppendMenuW(mb, MF_POPUP, (UINT_PTR)m, L"文件(&F)");
@@ -950,6 +1162,12 @@ static void CreateMainControls(HWND h)
     /* 右侧：参数设置 */
     g_hGrpParam = MakeCtl(L"BUTTON", L"参数设置", BS_GROUPBOX, 0, IDC_GRP_PARAM, h);
 
+    /* 改名方案（预设）：所有改名方式共用 */
+    g_hLblPreset = MakeCtl(L"STATIC", L"方案：", SS_LEFT, 0, IDC_LBL_PRESET, h);
+    g_hCmbPreset = MakeCtl(L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_VSCROLL, 0, IDC_CMB_PRESET, h);
+    g_hBtnSavePreset = MakeCtl(L"BUTTON", L"保存方案...", BS_PUSHBUTTON, 0, IDC_BTN_SAVE_PRESET, h);
+    g_hBtnDelPreset  = MakeCtl(L"BUTTON", L"删除", BS_PUSHBUTTON, 0, IDC_BTN_DEL_PRESET, h);
+
     g_hLblP1     = MakeCtl(L"STATIC", L"前缀：", SS_LEFT, 0, IDC_LBL_P1, h);
     g_hEdtP1     = MakeCtl(L"EDIT", L"", WS_BORDER | ES_AUTOHSCROLL, WS_EX_CLIENTEDGE, IDC_EDT_P1, h);
     g_hLblStart  = MakeCtl(L"STATIC", L"起始号码：", SS_LEFT, 0, IDC_LBL_START, h);
@@ -973,6 +1191,7 @@ static void CreateMainControls(HWND h)
     g_hLblRepl  = MakeCtl(L"STATIC", L"替换为：", SS_LEFT, 0, IDC_LBL_REPL, h);
     g_hEdtRepl  = MakeCtl(L"EDIT", L"", WS_BORDER | ES_AUTOHSCROLL, WS_EX_CLIENTEDGE, IDC_EDT_REPL, h);
     g_hChkCase  = MakeCtl(L"BUTTON", L"区分大小写", BS_AUTOCHECKBOX, 0, IDC_CHK_CASE, h);
+    g_hChkRegex = MakeCtl(L"BUTTON", L"使用正则表达式", BS_AUTOCHECKBOX, 0, IDC_CHK_REGEX, h);
 
     g_hLblExt     = MakeCtl(L"STATIC", L"新扩展名：", SS_LEFT, 0, IDC_LBL_EXT, h);
     g_hEdtExt     = MakeCtl(L"EDIT", L"", WS_BORDER | ES_AUTOHSCROLL, WS_EX_CLIENTEDGE, IDC_EDT_EXT, h);
@@ -984,6 +1203,11 @@ static void CreateMainControls(HWND h)
     g_hRadLower  = MakeCtl(L"BUTTON", L"全部小写", BS_AUTORADIOBUTTON, 0, IDC_RAD_LOWER, h);
     g_hChkExtCase = MakeCtl(L"BUTTON", L"同时转换扩展名", BS_AUTOCHECKBOX, 0, IDC_CHK_EXTCASE, h);
     SendMessageW(g_hRadUpper, BM_SETCHECK, BST_CHECKED, 0);
+
+    g_hLblDate     = MakeCtl(L"STATIC", L"日期格式：", SS_LEFT, 0, IDC_LBL_DATE, h);
+    g_hEdtDate     = MakeCtl(L"EDIT", L"yyyy-mm-dd", WS_BORDER | ES_AUTOHSCROLL, WS_EX_CLIENTEDGE, IDC_EDT_DATE, h);
+    g_hLblDateHint = MakeCtl(L"STATIC", L"（yyyy 年 mm 月 dd 日 hh 时 nn 分 ss 秒）",
+                             SS_LEFT, 0, IDC_LBL_DATEHINT, h);
 
     /* 文件列表 */
     g_hList = CreateWindowExW(WS_EX_CLIENTEDGE, WC_LISTVIEWW, NULL,
@@ -1017,9 +1241,10 @@ static void HideAllParams(void)
     HWND all[] = {
         g_hLblP1, g_hEdtP1, g_hLblStart, g_hEdtStart, g_hLblWidth, g_hCmbWidth,
         g_hLblPrefix, g_hEdtPrefix, g_hLblSuffix, g_hEdtSuffix,
-        g_hLblFind, g_hEdtFind, g_hLblRepl, g_hEdtRepl, g_hChkCase,
+        g_hLblFind, g_hEdtFind, g_hLblRepl, g_hEdtRepl, g_hChkCase, g_hChkRegex,
         g_hLblExt, g_hEdtExt, g_hLblExtWarn,
-        g_hRadUpper, g_hRadLower, g_hChkExtCase
+        g_hRadUpper, g_hRadLower, g_hChkExtCase,
+        g_hLblDate, g_hEdtDate, g_hLblDateHint
     };
     for (int i = 0; i < (int)(sizeof(all) / sizeof(all[0])); i++)
         ShowWindow(all[i], SW_HIDE);
@@ -1036,52 +1261,82 @@ static void LayoutParams(void)
 
     HideAllParams();
 
+    /* 方案行：所有改名方式都用得到 */
+    SetWindowPos(g_hLblPreset, NULL, x, y + S(3), S(44), S(18), SWP_NOZORDER);
+    SetWindowPos(g_hCmbPreset, NULL, x + S(46), y, S(120), S(200), SWP_NOZORDER);
+    SetWindowPos(g_hBtnSavePreset, NULL, x + S(172), y - S(1), S(92), S(24), SWP_NOZORDER);
+    SetWindowPos(g_hBtnDelPreset, NULL, x + S(268), y - S(1), S(60), S(24), SWP_NOZORDER);
+    ShowWindow(g_hLblPreset, SW_SHOW);
+    ShowWindow(g_hCmbPreset, SW_SHOW);
+    ShowWindow(g_hBtnSavePreset, SW_SHOW);
+    ShowWindow(g_hBtnDelPreset, SW_SHOW);
+
+    int y2 = y + S(30);
+
     switch (g_mode) {
     case MODE_NUMBER:
     case MODE_ALL: {
         SetWindowTextW(g_hLblP1, g_mode == MODE_ALL ? L"名称：" : L"前缀：");
-        SetWindowPos(g_hLblP1, NULL, x, y + S(3), lw, S(18), SWP_NOZORDER);
-        SetWindowPos(g_hEdtP1, NULL, x + lw, y, ew, S(22), SWP_NOZORDER);
-        SetWindowPos(g_hLblStart, NULL, x, y + rh + S(3), S(70), S(18), SWP_NOZORDER);
-        SetWindowPos(g_hEdtStart, NULL, x + S(74), y + rh, S(60), S(22), SWP_NOZORDER);
-        SetWindowPos(g_hLblWidth, NULL, x + S(150), y + rh + S(3), S(70), S(18), SWP_NOZORDER);
-        SetWindowPos(g_hCmbWidth, NULL, x + S(222), y + rh, S(60), S(200), SWP_NOZORDER);
+        SetWindowPos(g_hLblP1, NULL, x, y2 + S(3), lw, S(18), SWP_NOZORDER);
+        SetWindowPos(g_hEdtP1, NULL, x + lw, y2, ew, S(22), SWP_NOZORDER);
+        SetWindowPos(g_hLblStart, NULL, x, y2 + rh + S(3), S(70), S(18), SWP_NOZORDER);
+        SetWindowPos(g_hEdtStart, NULL, x + S(74), y2 + rh, S(60), S(22), SWP_NOZORDER);
+        SetWindowPos(g_hLblWidth, NULL, x + S(150), y2 + rh + S(3), S(70), S(18), SWP_NOZORDER);
+        SetWindowPos(g_hCmbWidth, NULL, x + S(222), y2 + rh, S(60), S(200), SWP_NOZORDER);
         ShowWindow(g_hLblP1, SW_SHOW); ShowWindow(g_hEdtP1, SW_SHOW);
         ShowWindow(g_hLblStart, SW_SHOW); ShowWindow(g_hEdtStart, SW_SHOW);
         ShowWindow(g_hLblWidth, SW_SHOW); ShowWindow(g_hCmbWidth, SW_SHOW);
         break;
     }
     case MODE_AFFIX:
-        SetWindowPos(g_hLblPrefix, NULL, x, y + S(3), lw, S(18), SWP_NOZORDER);
-        SetWindowPos(g_hEdtPrefix, NULL, x + lw, y, ew, S(22), SWP_NOZORDER);
-        SetWindowPos(g_hLblSuffix, NULL, x, y + rh + S(3), lw, S(18), SWP_NOZORDER);
-        SetWindowPos(g_hEdtSuffix, NULL, x + lw, y + rh, ew, S(22), SWP_NOZORDER);
+        SetWindowPos(g_hLblPrefix, NULL, x, y2 + S(3), lw, S(18), SWP_NOZORDER);
+        SetWindowPos(g_hEdtPrefix, NULL, x + lw, y2, ew, S(22), SWP_NOZORDER);
+        SetWindowPos(g_hLblSuffix, NULL, x, y2 + rh + S(3), lw, S(18), SWP_NOZORDER);
+        SetWindowPos(g_hEdtSuffix, NULL, x + lw, y2 + rh, ew, S(22), SWP_NOZORDER);
         ShowWindow(g_hLblPrefix, SW_SHOW); ShowWindow(g_hEdtPrefix, SW_SHOW);
         ShowWindow(g_hLblSuffix, SW_SHOW); ShowWindow(g_hEdtSuffix, SW_SHOW);
         break;
     case MODE_REPLACE:
-        SetWindowPos(g_hLblFind, NULL, x, y + S(3), S(70), S(18), SWP_NOZORDER);
-        SetWindowPos(g_hEdtFind, NULL, x + S(74), y, ew, S(22), SWP_NOZORDER);
-        SetWindowPos(g_hLblRepl, NULL, x, y + rh + S(3), S(70), S(18), SWP_NOZORDER);
-        SetWindowPos(g_hEdtRepl, NULL, x + S(74), y + rh, ew, S(22), SWP_NOZORDER);
-        SetWindowPos(g_hChkCase, NULL, x, y + rh * 2 + S(2), S(120), S(20), SWP_NOZORDER);
+        SetWindowPos(g_hLblFind, NULL, x, y2 + S(3), S(70), S(18), SWP_NOZORDER);
+        SetWindowPos(g_hEdtFind, NULL, x + S(74), y2, ew, S(22), SWP_NOZORDER);
+        SetWindowPos(g_hLblRepl, NULL, x, y2 + rh + S(3), S(70), S(18), SWP_NOZORDER);
+        SetWindowPos(g_hEdtRepl, NULL, x + S(74), y2 + rh, ew, S(22), SWP_NOZORDER);
+        SetWindowPos(g_hChkCase, NULL, x, y2 + rh * 2 + S(2), S(120), S(20), SWP_NOZORDER);
+        SetWindowPos(g_hChkRegex, NULL, x + S(130), y2 + rh * 2 + S(2), S(130), S(20), SWP_NOZORDER);
         ShowWindow(g_hLblFind, SW_SHOW); ShowWindow(g_hEdtFind, SW_SHOW);
         ShowWindow(g_hLblRepl, SW_SHOW); ShowWindow(g_hEdtRepl, SW_SHOW);
-        ShowWindow(g_hChkCase, SW_SHOW);
+        ShowWindow(g_hChkCase, SW_SHOW); ShowWindow(g_hChkRegex, SW_SHOW);
         break;
     case MODE_EXT:
-        SetWindowPos(g_hLblExt, NULL, x, y + S(3), S(70), S(18), SWP_NOZORDER);
-        SetWindowPos(g_hEdtExt, NULL, x + S(74), y, S(90), S(22), SWP_NOZORDER);
-        SetWindowPos(g_hLblExtWarn, NULL, x, y + rh + S(4), rc.right - rc.left - S(24), S(36), SWP_NOZORDER);
+        SetWindowPos(g_hLblExt, NULL, x, y2 + S(3), S(70), S(18), SWP_NOZORDER);
+        SetWindowPos(g_hEdtExt, NULL, x + S(74), y2, S(90), S(22), SWP_NOZORDER);
+        SetWindowPos(g_hLblExtWarn, NULL, x, y2 + rh + S(4), rc.right - rc.left - S(24), S(36), SWP_NOZORDER);
         ShowWindow(g_hLblExt, SW_SHOW); ShowWindow(g_hEdtExt, SW_SHOW);
         ShowWindow(g_hLblExtWarn, SW_SHOW);
         break;
     case MODE_CASE:
-        SetWindowPos(g_hRadUpper, NULL, x, y + S(3), S(90), S(20), SWP_NOZORDER);
-        SetWindowPos(g_hRadLower, NULL, x + S(96), y + S(3), S(90), S(20), SWP_NOZORDER);
-        SetWindowPos(g_hChkExtCase, NULL, x, y + rh + S(2), S(140), S(20), SWP_NOZORDER);
+        SetWindowPos(g_hRadUpper, NULL, x, y2 + S(3), S(90), S(20), SWP_NOZORDER);
+        SetWindowPos(g_hRadLower, NULL, x + S(96), y2 + S(3), S(90), S(20), SWP_NOZORDER);
+        SetWindowPos(g_hChkExtCase, NULL, x, y2 + rh + S(2), S(140), S(20), SWP_NOZORDER);
         ShowWindow(g_hRadUpper, SW_SHOW); ShowWindow(g_hRadLower, SW_SHOW);
         ShowWindow(g_hChkExtCase, SW_SHOW);
+        break;
+    case MODE_DATE:
+        SetWindowTextW(g_hLblP1, L"前缀：");
+        SetWindowPos(g_hLblP1, NULL, x, y2 + S(3), S(70), S(18), SWP_NOZORDER);
+        SetWindowPos(g_hEdtP1, NULL, x + S(74), y2, ew, S(22), SWP_NOZORDER);
+        SetWindowPos(g_hLblStart, NULL, x, y2 + rh + S(3), S(70), S(18), SWP_NOZORDER);
+        SetWindowPos(g_hEdtStart, NULL, x + S(74), y2 + rh, S(60), S(22), SWP_NOZORDER);
+        SetWindowPos(g_hLblWidth, NULL, x + S(150), y2 + rh + S(3), S(70), S(18), SWP_NOZORDER);
+        SetWindowPos(g_hCmbWidth, NULL, x + S(222), y2 + rh, S(60), S(200), SWP_NOZORDER);
+        SetWindowPos(g_hLblDate, NULL, x, y2 + rh * 2 + S(3), S(70), S(18), SWP_NOZORDER);
+        SetWindowPos(g_hEdtDate, NULL, x + S(74), y2 + rh * 2, S(100), S(22), SWP_NOZORDER);
+        SetWindowPos(g_hLblDateHint, NULL, x + S(180), y2 + rh * 2 + S(3), S(260), S(18), SWP_NOZORDER);
+        ShowWindow(g_hLblP1, SW_SHOW); ShowWindow(g_hEdtP1, SW_SHOW);
+        ShowWindow(g_hLblStart, SW_SHOW); ShowWindow(g_hEdtStart, SW_SHOW);
+        ShowWindow(g_hLblWidth, SW_SHOW); ShowWindow(g_hCmbWidth, SW_SHOW);
+        ShowWindow(g_hLblDate, SW_SHOW); ShowWindow(g_hEdtDate, SW_SHOW);
+        ShowWindow(g_hLblDateHint, SW_SHOW);
         break;
     }
 }
@@ -1102,11 +1357,11 @@ static void DoLayout(void)
     int statusH = rs.bottom - rs.top;
     int pad = S(6);
 
-    int blockH = S(104);
+    int blockH = S(150);
     SetWindowPos(g_hGrpMode, NULL, pad, top + pad, S(132), blockH, SWP_NOZORDER);
     int i;
     for (i = 0; i < MODE_COUNT; i++)
-        SetWindowPos(g_hRadMode[i], NULL, pad + S(10), top + pad + S(20) + i * S(20),
+        SetWindowPos(g_hRadMode[i], NULL, pad + S(10), top + pad + S(20) + i * S(18),
                      S(112), S(18), SWP_NOZORDER);
 
     SetWindowPos(g_hGrpParam, NULL, pad + S(138), top + pad,
@@ -1137,6 +1392,283 @@ static void OnModeChanged(void)
 /* ─────────────────────────── 参数记忆 ─────────────────────────── */
 static void IniPath(WCHAR *out) { swprintf(out, MAX_PATH, L"%ls\\rename.ini", g_exeDir); }
 
+/* 把当前界面上的全部规则参数写进 ini 的指定节（Options 或 PresetN） */
+static void WriteOptionsToSection(const WCHAR *sec, const WCHAR *name)
+{
+    WCHAR ini[MAX_PATH], b[64], t[512];
+    IniPath(ini);
+    if (name) WritePrivateProfileStringW(sec, L"Name", name, ini);
+
+    swprintf(b, 64, L"%d", g_mode);
+    WritePrivateProfileStringW(sec, L"Mode", b, ini);
+
+    GetWindowTextW(g_hEdtP1, t, 512);      WritePrivateProfileStringW(sec, L"P1", t, ini);
+    GetWindowTextW(g_hEdtPrefix, t, 512);  WritePrivateProfileStringW(sec, L"Prefix", t, ini);
+    GetWindowTextW(g_hEdtSuffix, t, 512);  WritePrivateProfileStringW(sec, L"Suffix", t, ini);
+    GetWindowTextW(g_hEdtFind, t, 512);    WritePrivateProfileStringW(sec, L"Find", t, ini);
+    GetWindowTextW(g_hEdtRepl, t, 512);    WritePrivateProfileStringW(sec, L"Replace", t, ini);
+    GetWindowTextW(g_hEdtExt, t, 128);     WritePrivateProfileStringW(sec, L"Ext", t, ini);
+    GetWindowTextW(g_hEdtStart, t, 64);    WritePrivateProfileStringW(sec, L"Start", t, ini);
+    GetWindowTextW(g_hEdtDate, t, 128);    WritePrivateProfileStringW(sec, L"DateFmt", t, ini);
+
+    swprintf(b, 64, L"%d", (int)SendMessageW(g_hCmbWidth, CB_GETCURSEL, 0, 0) + 1);
+    WritePrivateProfileStringW(sec, L"Width", b, ini);
+    swprintf(b, 64, L"%d", SendMessageW(g_hChkCase, BM_GETCHECK, 0, 0) == BST_CHECKED ? 1 : 0);
+    WritePrivateProfileStringW(sec, L"Case", b, ini);
+    swprintf(b, 64, L"%d", SendMessageW(g_hChkRegex, BM_GETCHECK, 0, 0) == BST_CHECKED ? 1 : 0);
+    WritePrivateProfileStringW(sec, L"Regex", b, ini);
+    swprintf(b, 64, L"%d", SendMessageW(g_hChkExtCase, BM_GETCHECK, 0, 0) == BST_CHECKED ? 1 : 0);
+    WritePrivateProfileStringW(sec, L"ExtCase", b, ini);
+    swprintf(b, 64, L"%d", SendMessageW(g_hRadUpper, BM_GETCHECK, 0, 0) == BST_CHECKED ? 1 : 0);
+    WritePrivateProfileStringW(sec, L"Upper", b, ini);
+}
+
+/* 从 ini 的指定节读回参数；applyMode 为真时连改名方式一起恢复 */
+static void ReadOptionsFromSection(const WCHAR *sec, BOOL applyMode)
+{
+    WCHAR ini[MAX_PATH], t[512];
+    IniPath(ini);
+
+    if (applyMode) {
+        g_mode = GetPrivateProfileIntW(sec, L"Mode", 0, ini);
+        if (g_mode < 0 || g_mode >= MODE_COUNT) g_mode = 0;
+        SendMessageW(g_hRadMode[g_mode], BM_SETCHECK, BST_CHECKED, 0);
+    }
+
+    GetPrivateProfileStringW(sec, L"P1", L"", t, 512, ini);      SetWindowTextW(g_hEdtP1, t);
+    GetPrivateProfileStringW(sec, L"Prefix", L"", t, 512, ini);  SetWindowTextW(g_hEdtPrefix, t);
+    GetPrivateProfileStringW(sec, L"Suffix", L"", t, 512, ini);  SetWindowTextW(g_hEdtSuffix, t);
+    GetPrivateProfileStringW(sec, L"Find", L"", t, 512, ini);    SetWindowTextW(g_hEdtFind, t);
+    GetPrivateProfileStringW(sec, L"Replace", L"", t, 512, ini); SetWindowTextW(g_hEdtRepl, t);
+    GetPrivateProfileStringW(sec, L"Ext", L"", t, 128, ini);     SetWindowTextW(g_hEdtExt, t);
+    GetPrivateProfileStringW(sec, L"Start", L"1", t, 64, ini);   SetWindowTextW(g_hEdtStart, t);
+    GetPrivateProfileStringW(sec, L"DateFmt", L"yyyy-mm-dd", t, 128, ini);
+    SetWindowTextW(g_hEdtDate, t);
+
+    int w = GetPrivateProfileIntW(sec, L"Width", 3, ini);
+    if (w < 1) w = 1;
+    if (w > 6) w = 6;
+    SendMessageW(g_hCmbWidth, CB_SETCURSEL, w - 1, 0);
+
+    SendMessageW(g_hChkCase, BM_SETCHECK,
+                 GetPrivateProfileIntW(sec, L"Case", 0, ini) ? BST_CHECKED : BST_UNCHECKED, 0);
+    SendMessageW(g_hChkRegex, BM_SETCHECK,
+                 GetPrivateProfileIntW(sec, L"Regex", 0, ini) ? BST_CHECKED : BST_UNCHECKED, 0);
+    SendMessageW(g_hChkExtCase, BM_SETCHECK,
+                 GetPrivateProfileIntW(sec, L"ExtCase", 0, ini) ? BST_CHECKED : BST_UNCHECKED, 0);
+    if (GetPrivateProfileIntW(sec, L"Upper", 1, ini))
+        SendMessageW(g_hRadUpper, BM_SETCHECK, BST_CHECKED, 0);
+    else
+        SendMessageW(g_hRadLower, BM_SETCHECK, BST_CHECKED, 0);
+
+    if (applyMode) LayoutParams();
+}
+
+/* ─────────────────────── 改名方案（预设）─────────────────────── */
+#define PRESET_MAX 9
+
+static void PresetSection(int n, WCHAR *out, int cap) { swprintf(out, cap, L"Preset%d", n); }
+
+/* 重建“方案”下拉列表：第 0 项是“不使用方案”，后面是 9 个位置 */
+static void RefreshPresetCombo(int keepSel)
+{
+    WCHAR ini[MAX_PATH];
+    IniPath(ini);
+    int sel = keepSel ? (int)SendMessageW(g_hCmbPreset, CB_GETCURSEL, 0, 0) : 0;
+
+    SendMessageW(g_hCmbPreset, WM_SETREDRAW, FALSE, 0);
+    SendMessageW(g_hCmbPreset, CB_RESETCONTENT, 0, 0);
+    SendMessageW(g_hCmbPreset, CB_ADDSTRING, 0, (LPARAM)L"（不使用方案）");
+    for (int n = 1; n <= PRESET_MAX; n++) {
+        WCHAR sec[32], name[128], item[192];
+        PresetSection(n, sec, 32);
+        GetPrivateProfileStringW(sec, L"Name", L"", name, 128, ini);
+        if (name[0]) swprintf(item, 192, L"%d. %ls", n, name);
+        else         swprintf(item, 192, L"%d. （空）", n);
+        SendMessageW(g_hCmbPreset, CB_ADDSTRING, 0, (LPARAM)item);
+    }
+    if (sel < 0 || sel > PRESET_MAX) sel = 0;
+    SendMessageW(g_hCmbPreset, CB_SETCURSEL, sel, 0);
+    SendMessageW(g_hCmbPreset, WM_SETREDRAW, TRUE, 0);
+    InvalidateRect(g_hCmbPreset, NULL, TRUE);
+}
+
+static void LoadPreset(int n)
+{
+    WCHAR ini[MAX_PATH], sec[32], name[128];
+    IniPath(ini);
+    PresetSection(n, sec, 32);
+    GetPrivateProfileStringW(sec, L"Name", L"", name, 128, ini);
+    if (!name[0]) {
+        MessageBoxW(g_hMain, L"这个方案位置还是空的。\n\n"
+                             L"请先设置好改名方式和参数，再单击“保存方案”。",
+                    APP_NAME, MB_OK | MB_ICONINFORMATION);
+        return;
+    }
+    ReadOptionsFromSection(sec, TRUE);
+    UpdatePreviewAndList();
+
+    WCHAR sb[192];
+    swprintf(sb, 192, L"已调用方案：%ls", name);
+    StatusSet(0, sb);
+}
+
+/* 一个简单的文本输入框（用于给方案起名），传统 Win32 风格 */
+static WCHAR *g_inBuf;
+static int    g_inCap;
+static int    g_inOk;
+
+static LRESULT CALLBACK InputProc(HWND h, UINT m, WPARAM w, LPARAM l)
+{
+    switch (m) {
+    case WM_CREATE:
+        ApplyClassicLook(h);
+        return 0;
+    case WM_COMMAND:
+        switch (LOWORD(w)) {
+        case IDC_INPUT_OK:
+            GetWindowTextW(GetDlgItem(h, IDC_INPUT_EDIT), g_inBuf, g_inCap);
+            g_inOk = 1;
+            DestroyWindow(h);
+            return 0;
+        case IDC_INPUT_CANCEL:
+        case IDCANCEL:
+            DestroyWindow(h);
+            return 0;
+        }
+        return 0;
+    case WM_CLOSE:
+        DestroyWindow(h);
+        return 0;
+    }
+    return DefWindowProcW(h, m, w, l);
+}
+
+static BOOL PromptText(HWND owner, const WCHAR *title, const WCHAR *label,
+                       WCHAR *buf, int cap)
+{
+    static BOOL reg = FALSE;
+    if (!reg) {
+        WNDCLASSW wc;
+        ZeroMemory(&wc, sizeof(wc));
+        wc.lpfnWndProc = InputProc;
+        wc.hInstance = g_hInst;
+        wc.hCursor = LoadCursorW(NULL, IDC_ARROW);
+        wc.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1);
+        wc.lpszClassName = L"XYInputWnd";
+        RegisterClassW(&wc);
+        reg = TRUE;
+    }
+    g_inBuf = buf;
+    g_inCap = cap;
+    g_inOk = 0;
+
+    int W = S(340), H = S(140);
+    HWND h = CreateWindowExW(WS_EX_DLGMODALFRAME, L"XYInputWnd", title,
+                             WS_POPUP | WS_CAPTION | WS_SYSMENU,
+                             CW_USEDEFAULT, CW_USEDEFAULT, W, H,
+                             owner, NULL, g_hInst, NULL);
+    if (!h) return FALSE;
+
+    HWND lb = CreateWindowExW(0, L"STATIC", label, WS_CHILD | WS_VISIBLE | SS_LEFT,
+                              S(14), S(12), W - S(28), S(18), h, (HMENU)IDC_INPUT_LABEL, g_hInst, NULL);
+    HWND ed = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", buf,
+                              WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
+                              S(14), S(34), W - S(28), S(22), h, (HMENU)IDC_INPUT_EDIT, g_hInst, NULL);
+    HWND ok = CreateWindowExW(0, L"BUTTON", L"确定",
+                              WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON,
+                              W - S(174), S(72), S(76), S(24), h, (HMENU)IDC_INPUT_OK, g_hInst, NULL);
+    HWND ca = CreateWindowExW(0, L"BUTTON", L"取消",
+                              WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
+                              W - S(92), S(72), S(76), S(24), h, (HMENU)IDC_INPUT_CANCEL, g_hInst, NULL);
+    SetCtlFont(lb); SetCtlFont(ed); SetCtlFont(ok); SetCtlFont(ca);
+    SendMessageW(ed, EM_LIMITTEXT, cap - 1, 0);
+    SendMessageW(ed, EM_SETSEL, 0, -1);
+
+    CenterOnOwner(h, owner);
+    if (owner) EnableWindow(owner, FALSE);
+    ShowWindow(h, SW_SHOW);
+    UpdateWindow(h);
+    SetFocus(ed);
+
+    MSG msg;
+    while (IsWindow(h) && GetMessageW(&msg, NULL, 0, 0) > 0) {
+        if (IsDialogMessageW(h, &msg)) continue;
+        TranslateMessage(&msg);
+        DispatchMessageW(&msg);
+    }
+    if (owner) { EnableWindow(owner, TRUE); SetForegroundWindow(owner); }
+    return g_inOk;
+}
+
+static void DoSavePreset(void)
+{
+    WCHAR ini[MAX_PATH];
+    IniPath(ini);
+
+    int n = (int)SendMessageW(g_hCmbPreset, CB_GETCURSEL, 0, 0);
+    if (n < 1 || n > PRESET_MAX) {
+        /* 没有指定位置，就找第一个空位 */
+        n = 0;
+        for (int i = 1; i <= PRESET_MAX; i++) {
+            WCHAR sec[32], name[128];
+            PresetSection(i, sec, 32);
+            GetPrivateProfileStringW(sec, L"Name", L"", name, 128, ini);
+            if (!name[0]) { n = i; break; }
+        }
+        if (n == 0) {
+            MessageBoxW(g_hMain,
+                L"9 个方案位置已经全部用满。\n\n"
+                L"请先在“方案”列表中选择一个要覆盖的位置，再单击“保存方案”。",
+                APP_NAME, MB_OK | MB_ICONINFORMATION);
+            return;
+        }
+    }
+
+    WCHAR sec[32], old[128], def[128];
+    PresetSection(n, sec, 32);
+    GetPrivateProfileStringW(sec, L"Name", L"", old, 128, ini);
+    if (old[0]) lstrcpynW(def, old, 128);
+    else        swprintf(def, 128, L"方案 %d", n);
+
+    if (!PromptText(g_hMain, L"保存方案", L"请输入方案的名称：", def, 128)) return;
+    if (!def[0]) swprintf(def, 128, L"方案 %d", n);
+
+    WriteOptionsToSection(sec, def);
+    RefreshPresetCombo(1);
+    SendMessageW(g_hCmbPreset, CB_SETCURSEL, n, 0);
+
+    WCHAR sb[192];
+    swprintf(sb, 192, L"方案“%ls”已保存。", def);
+    StatusSet(0, sb);
+}
+
+static void DoDeletePreset(void)
+{
+    int n = (int)SendMessageW(g_hCmbPreset, CB_GETCURSEL, 0, 0);
+    if (n < 1 || n > PRESET_MAX) {
+        MessageBoxW(g_hMain, L"请先在“方案”列表中选择要删除的方案。",
+                    APP_NAME, MB_OK | MB_ICONINFORMATION);
+        return;
+    }
+
+    WCHAR ini[MAX_PATH], sec[32], name[128], msg[256];
+    IniPath(ini);
+    PresetSection(n, sec, 32);
+    GetPrivateProfileStringW(sec, L"Name", L"", name, 128, ini);
+    if (!name[0]) {
+        MessageBoxW(g_hMain, L"这个方案位置本来就是空的。",
+                    APP_NAME, MB_OK | MB_ICONINFORMATION);
+        return;
+    }
+    swprintf(msg, 256, L"确定要删除方案“%ls”吗？", name);
+    if (MessageBoxW(g_hMain, msg, APP_NAME, MB_YESNO | MB_ICONQUESTION) != IDYES) return;
+
+    WritePrivateProfileStringW(sec, NULL, NULL, ini);
+    RefreshPresetCombo(0);
+    StatusSet(0, L"方案已删除。");
+}
+
 static void SaveSettings(void)
 {
     WCHAR ini[MAX_PATH];
@@ -1154,61 +1686,19 @@ static void SaveSettings(void)
         swprintf(b, 64, L"%d", wp.rcNormalPosition.bottom - wp.rcNormalPosition.top);
         WritePrivateProfileStringW(L"Window", L"H", b, ini);
     }
-    WCHAR b[64];
-    swprintf(b, 64, L"%d", g_mode);
-    WritePrivateProfileStringW(L"Options", L"Mode", b, ini);
-
-    WCHAR t[512];
-    GetWindowTextW(g_hEdtP1, t, 512);      WritePrivateProfileStringW(L"Options", L"P1", t, ini);
-    GetWindowTextW(g_hEdtPrefix, t, 512);  WritePrivateProfileStringW(L"Options", L"Prefix", t, ini);
-    GetWindowTextW(g_hEdtSuffix, t, 512);  WritePrivateProfileStringW(L"Options", L"Suffix", t, ini);
-    GetWindowTextW(g_hEdtFind, t, 512);    WritePrivateProfileStringW(L"Options", L"Find", t, ini);
-    GetWindowTextW(g_hEdtRepl, t, 512);    WritePrivateProfileStringW(L"Options", L"Replace", t, ini);
-    GetWindowTextW(g_hEdtExt, t, 128);     WritePrivateProfileStringW(L"Options", L"Ext", t, ini);
-    GetWindowTextW(g_hEdtStart, t, 64);    WritePrivateProfileStringW(L"Options", L"Start", t, ini);
-    swprintf(b, 64, L"%d", (int)SendMessageW(g_hCmbWidth, CB_GETCURSEL, 0, 0) + 1);
-    WritePrivateProfileStringW(L"Options", L"Width", b, ini);
-    swprintf(b, 64, L"%d", SendMessageW(g_hChkCase, BM_GETCHECK, 0, 0) == BST_CHECKED ? 1 : 0);
-    WritePrivateProfileStringW(L"Options", L"Case", b, ini);
-    swprintf(b, 64, L"%d", SendMessageW(g_hChkExtCase, BM_GETCHECK, 0, 0) == BST_CHECKED ? 1 : 0);
-    WritePrivateProfileStringW(L"Options", L"ExtCase", b, ini);
-    swprintf(b, 64, L"%d", SendMessageW(g_hRadUpper, BM_GETCHECK, 0, 0) == BST_CHECKED ? 1 : 0);
-    WritePrivateProfileStringW(L"Options", L"Upper", b, ini);
+    WriteOptionsToSection(L"Options", NULL);
+    WritePrivateProfileStringW(L"Options", L"SubDir", g_subDir ? L"1" : L"0", ini);
 }
 
 static void LoadSettings(void)
 {
     WCHAR ini[MAX_PATH];
     IniPath(ini);
-    WCHAR t[512];
 
-    g_mode = GetPrivateProfileIntW(L"Options", L"Mode", 0, ini);
-    if (g_mode < 0 || g_mode >= MODE_COUNT) g_mode = 0;
-
-    GetPrivateProfileStringW(L"Options", L"P1", L"", t, 512, ini);      SetWindowTextW(g_hEdtP1, t);
-    GetPrivateProfileStringW(L"Options", L"Prefix", L"", t, 512, ini);  SetWindowTextW(g_hEdtPrefix, t);
-    GetPrivateProfileStringW(L"Options", L"Suffix", L"", t, 512, ini);  SetWindowTextW(g_hEdtSuffix, t);
-    GetPrivateProfileStringW(L"Options", L"Find", L"", t, 512, ini);    SetWindowTextW(g_hEdtFind, t);
-    GetPrivateProfileStringW(L"Options", L"Replace", L"", t, 512, ini); SetWindowTextW(g_hEdtRepl, t);
-    GetPrivateProfileStringW(L"Options", L"Ext", L"", t, 128, ini);     SetWindowTextW(g_hEdtExt, t);
-    GetPrivateProfileStringW(L"Options", L"Start", L"1", t, 64, ini);   SetWindowTextW(g_hEdtStart, t);
-
-    int w = GetPrivateProfileIntW(L"Options", L"Width", 3, ini);
-    if (w < 1) w = 1;
-    if (w > 6) w = 6;
-    SendMessageW(g_hCmbWidth, CB_SETCURSEL, w - 1, 0);
-
-    if (GetPrivateProfileIntW(L"Options", L"Case", 0, ini))
-        SendMessageW(g_hChkCase, BM_SETCHECK, BST_CHECKED, 0);
-    if (GetPrivateProfileIntW(L"Options", L"ExtCase", 0, ini))
-        SendMessageW(g_hChkExtCase, BM_SETCHECK, BST_CHECKED, 0);
-    if (GetPrivateProfileIntW(L"Options", L"Upper", 1, ini))
-        SendMessageW(g_hRadUpper, BM_SETCHECK, BST_CHECKED, 0);
-    else
-        SendMessageW(g_hRadLower, BM_SETCHECK, BST_CHECKED, 0);
-
-    SendMessageW(g_hRadMode[g_mode], BM_SETCHECK, BST_CHECKED, 0);
-    LayoutParams();
+    g_subDir = GetPrivateProfileIntW(L"Options", L"SubDir", 0, ini) ? TRUE : FALSE;
+    ReadOptionsFromSection(L"Options", TRUE);
+    RefreshPresetCombo(0);
+    UpdateSubDirMenu();
 }
 
 /* ─────────────────────────── 快捷键 ─────────────────────────── */
@@ -1233,6 +1723,10 @@ static void OnCommand(int id, HWND hCtl, UINT code)
     switch (id) {
     case IDM_FILE_ADDFILES: case IDT_ADDFILES: DoAddFiles(); return;
     case IDM_FILE_ADDDIR:   case IDT_ADDDIR:   DoAddDir(); return;
+    case IDM_FILE_SUBDIR:
+        g_subDir = !g_subDir;
+        UpdateSubDirMenu();
+        return;
     case IDM_FILE_EXIT:     SendMessageW(g_hMain, WM_CLOSE, 0, 0); return;
     case IDM_EDIT_SELALL:
         for (int i = 0; i < g_count; i++)
@@ -1254,14 +1748,31 @@ static void OnCommand(int id, HWND hCtl, UINT code)
     }
     if (id == IDC_RAD_UPPER || id == IDC_RAD_LOWER) { UpdatePreviewAndList(); return; }
 
+    /* 改名方案 */
+    switch (id) {
+    case IDC_CMB_PRESET:
+        if (code == CBN_SELCHANGE) {
+            int n = (int)SendMessageW(g_hCmbPreset, CB_GETCURSEL, 0, 0);
+            if (n >= 1) LoadPreset(n);
+            else        UpdatePreviewAndList();
+        }
+        return;
+    case IDC_BTN_SAVE_PRESET:
+        if (code == BN_CLICKED) DoSavePreset();
+        return;
+    case IDC_BTN_DEL_PRESET:
+        if (code == BN_CLICKED) DoDeletePreset();
+        return;
+    }
+
     /* 参数变化 → 刷新预览 */
     switch (id) {
     case IDC_EDT_P1: case IDC_EDT_PREFIX: case IDC_EDT_SUFFIX:
     case IDC_EDT_FIND: case IDC_EDT_REPL: case IDC_EDT_EXT:
-    case IDC_EDT_START:
+    case IDC_EDT_START: case IDC_EDT_DATE:
         if (code == EN_CHANGE) UpdatePreviewAndList();
         return;
-    case IDC_CHK_CASE: case IDC_CHK_EXTCASE:
+    case IDC_CHK_CASE: case IDC_CHK_EXTCASE: case IDC_CHK_REGEX:
         if (code == BN_CLICKED) UpdatePreviewAndList();
         return;
     case IDC_CMB_WIDTH:
@@ -1337,14 +1848,19 @@ static LRESULT CALLBACK MainProc(HWND h, UINT m, WPARAM w, LPARAM l)
         HDROP hd = (HDROP)w;
         UINT n = DragQueryFileW(hd, 0xFFFFFFFF, NULL, 0);
         int added = 0;
+        BOOL asked = FALSE;
         for (UINT i = 0; i < n; i++) {
             WCHAR path[MAX_PATH];
             DragQueryFileW(hd, i, path, MAX_PATH);
             DWORD attr = GetFileAttributesW(path);
-            if (attr != INVALID_FILE_ATTRIBUTES && (attr & FILE_ATTRIBUTE_DIRECTORY))
-                added += AddDirectoryItems(path);
-            else if (AddFileItem(path))
+            if (attr != INVALID_FILE_ATTRIBUTES && (attr & FILE_ATTRIBUTE_DIRECTORY)) {
+                BOOL recursive = g_subDir;
+                if (!recursive && HasSubDir(path))
+                    recursive = AskSubDirOnce(&asked);
+                added += AddDirectoryItems(path, recursive);
+            } else if (AddFileItem(path)) {
                 added++;
+            }
         }
         DragFinish(hd);
         UpdatePreviewAndList();

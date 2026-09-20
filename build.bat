@@ -15,7 +15,7 @@ windres src\app.rc -o build\app.o --include-dir=res --codepage=65001 -F pe-x86-6
 if errorlevel 1 goto fail
 
 echo [2/2] compiling program ...
-gcc -O2 -municode -mwindows -Wall -s -o XYRename.exe src\main.c src\help.c src\about.c src\topics.c build\app.o -lcomctl32 -lcomdlg32 -lshell32 -lshlwapi -lole32 -luuid -lgdi32 -luser32
+gcc -O2 -municode -mwindows -Wall -s -o XYRename.exe src\main.c src\help.c src\about.c src\topics.c src\exif.c src\regex.c build\app.o -lcomctl32 -lcomdlg32 -lshell32 -lshlwapi -lole32 -luuid -lgdi32 -luser32
 if errorlevel 1 goto fail
 
 echo.

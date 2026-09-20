@@ -1,4 +1,4 @@
-/* resource.h — 小雨超级文件批量改名专家 V1.0 资源编号定义 */
+/* resource.h — 小雨超级文件批量改名专家 V1.1 资源编号定义 */
 #ifndef XYRESOURCE_H
 #define XYRESOURCE_H
 
@@ -23,6 +23,7 @@
 #define IDM_FILE_ADDFILES   2001
 #define IDM_FILE_ADDDIR     2002
 #define IDM_FILE_EXIT       2003
+#define IDM_FILE_SUBDIR     2004
 #define IDM_EDIT_SELALL     2011
 #define IDM_EDIT_REMOVE     2012
 #define IDM_EDIT_CLEAR      2013
@@ -53,7 +54,7 @@
 
 /* 主窗口控件 */
 #define IDC_GRP_MODE        5001
-#define IDC_RAD_MODE_BASE   5010   /* 5010 ~ 5015 六种改名方式 */
+#define IDC_RAD_MODE_BASE   5010   /* 5010 ~ 5016 七种改名方式 */
 #define IDC_GRP_PARAM       5020
 #define IDC_LBL_P1          5021
 #define IDC_EDT_P1          5022
@@ -70,18 +71,32 @@
 #define IDC_LBL_REPL        5042
 #define IDC_EDT_REPL        5043
 #define IDC_CHK_CASE        5044
+#define IDC_CHK_REGEX       5045   /* 查找替换使用正则表达式 */
 #define IDC_LBL_EXT         5050
 #define IDC_EDT_EXT         5051
 #define IDC_LBL_EXTWARN     5052
 #define IDC_RAD_UPPER       5060
 #define IDC_RAD_LOWER       5061
 #define IDC_CHK_EXTCASE     5062
+#define IDC_LBL_DATE        5070   /* 日期格式 */
+#define IDC_EDT_DATE        5071
+#define IDC_LBL_DATEHINT    5072
+#define IDC_LBL_PRESET      5080   /* 改名方案 */
+#define IDC_CMB_PRESET      5081
+#define IDC_BTN_SAVE_PRESET 5082
+#define IDC_BTN_DEL_PRESET  5083
 #define IDC_LIST            5100
 #define IDC_STATUS          5101
 #define IDC_TOOLBAR         5102
 #define IDC_PROGRESS        5103
 #define IDC_PROG_TEXT       5104
 #define IDC_PROG_BTN        5105
+
+/* 输入框（保存方案时输入名称）*/
+#define IDC_INPUT_LABEL     5300
+#define IDC_INPUT_EDIT      5301
+#define IDC_INPUT_OK        5302
+#define IDC_INPUT_CANCEL    5303
 
 /* 关于对话框控件 */
 #define IDC_ABOUT_ICON      5200

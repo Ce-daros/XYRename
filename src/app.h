@@ -4,18 +4,19 @@
 
 #include <windows.h>
 
-#define APP_TITLE    L"小雨超级文件批量改名专家 V1.0 正式版"
+#define APP_TITLE    L"小雨超级文件批量改名专家 V1.1 正式版"
 #define APP_NAME     L"小雨超级文件批量改名专家"
-#define APP_VER      L"V1.0 正式版"
+#define APP_VER      L"V1.1 正式版"
 
 /* 改名方式 */
 enum {
     MODE_NUMBER = 0,   /* 统一编号 */
     MODE_AFFIX,        /* 添加前后缀 */
-    MODE_REPLACE,      /* 查找替换 */
+    MODE_REPLACE,      /* 查找替换（可选用正则表达式） */
     MODE_EXT,          /* 修改扩展名 */
     MODE_ALL,          /* 全部替换 */
     MODE_CASE,         /* 大小写转换 */
+    MODE_DATE,         /* 按拍摄日期编号 */
     MODE_COUNT
 };
 
@@ -37,6 +38,8 @@ typedef struct {
     WCHAR     newname[MAX_PATH];  /* 预览的新文件名 */
     ULONGLONG size;
     FILETIME  mtime;
+    SYSTEMTIME taken;             /* 拍摄日期（无 EXIF 时取文件修改时间） */
+    int       hasTaken;           /* 1 = taken 来自 EXIF 拍摄时间 */
     int       status;             /* 0 正常  1 有问题  2 扩展名变化 */
 } FileItem;
 
