@@ -1,0 +1,53 @@
+/* app.rc — 小雨超级文件批量改名专家 V1.0 资源脚本
+   说明：本文件由 build.bat 先用 iconv 转为 GBK 再交给 windres 编译，
+         以免中文字符串乱码。 */
+#include <windows.h>
+#include "resource.h"
+
+/* ── 程序图标 ────────────────────────────────────────────── */
+IDI_APP            ICON  "app.ico"
+IDI_TB_ADDFILE     ICON  "tb_addfile.ico"
+IDI_TB_ADDDIR      ICON  "tb_adddir.ico"
+IDI_TB_REMOVE      ICON  "tb_remove.ico"
+IDI_TB_START       ICON  "tb_start.ico"
+IDI_TB_UNDO        ICON  "tb_undo.ico"
+IDI_HP_BACK        ICON  "hp_back.ico"
+IDI_HP_FWD         ICON  "hp_fwd.ico"
+IDI_HP_HOME        ICON  "hp_home.ico"
+IDI_HP_PRINT       ICON  "hp_print.ico"
+IDI_HP_PANEL       ICON  "hp_panel.ico"
+IDI_TREE_CLOSED    ICON  "tree_closed.ico"
+IDI_TREE_OPEN      ICON  "tree_open.ico"
+IDI_TREE_PAGE      ICON  "tree_page.ico"
+IDI_HELP           ICON  "help.ico"
+
+/* ── 版本信息（右键属性里看到的内容）──────────────────────── */
+VS_VERSION_INFO VERSIONINFO
+ FILEVERSION    1,0,0,0
+ PRODUCTVERSION 1,0,0,0
+ FILEFLAGSMASK  VS_FFI_FILEFLAGSMASK
+ FILEFLAGS      0
+ FILEOS         VOS__WINDOWS32
+ FILETYPE       VFT_APP
+ FILESUBTYPE    VFT2_UNKNOWN
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "080404b0"
+        BEGIN
+            VALUE "CompanyName",      "小雨软件工作室"
+            VALUE "FileDescription",  "小雨超级文件批量改名专家"
+            VALUE "FileVersion",      "1.0.0.0"
+            VALUE "InternalName",     "XYRename"
+            VALUE "LegalCopyright",   "版权所有 (C) 2007 小雨软件工作室"
+            VALUE "OriginalFilename", "XYRename.exe"
+            VALUE "ProductName",      "小雨超级文件批量改名专家"
+            VALUE "ProductVersion",   "V1.0 正式版"
+            VALUE "Comments",         "免费软件，欢迎传播。主页：angelkawaii.xyz"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x804, 1200
+    END
+END

@@ -1,0 +1,5 @@
+build/
+rename.ini
+undo.dat
+XYRename.log
+*.o
