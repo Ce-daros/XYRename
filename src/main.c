@@ -1,12 +1,11 @@
-/* main.c — 小雨超级文件批量改名专家 V1.1 正式版
+/* main.c — 小雨超级文件批量改名专家 V1.4.1 正式版
  * 主程序：界面、文件列表、改名规则、预览、执行、撤销、参数记忆
  * 纯 Win32 SDK + C，未使用 MFC
  *
- * V1.1 在 V1.0 基础上新增：
- *   1、导入目录时可包含子文件夹（选择会记住）；
- *   2、按拍摄日期编号（读取 JPEG 的 EXIF 拍摄时间）；
- *   3、查找替换支持正则表达式；
- *   4、改名方案（预设）保存与调用。
+ * V1.4.1 在 V1.1 基础上对主界面做了布局重构：
+ *   1、窗口加大，改名方式/参数设置分组框重新排版；
+ *   2、工具栏改为纯 16×16 图标小按钮，并增加鼠标提示；
+ *   3、文件列表支持整行选中，状态栏随窗口宽度缩放。
  */
 #ifndef UNICODE
 #define UNICODE
@@ -54,7 +53,7 @@ static HACCEL g_hAccel = NULL;
 static BOOL  g_subDir = FALSE;   /* 导入目录时是否包含子文件夹 */
 
 /* 列表列宽（96dpi 基准） */
-static const int g_colW[COL_COUNT] = { 200, 200, 60, 80, 120 };
+static const int g_colW[COL_COUNT] = { 240, 240, 70, 90, 140 };
 static const WCHAR *g_colName[COL_COUNT] = { L"原文件名", L"新文件名", L"扩展名", L"大小", L"修改日期" };
 
 /* 改名方式名称（顺序必须与 app.h 中的 MODE_* 枚举一致） */
@@ -1114,11 +1113,12 @@ static void CreateToolbar(HWND h)
     HIMAGELIST himl = ImageList_Create(S(16), S(16), ILC_COLOR32 | ILC_MASK, 4, 1);
     ImageList_SetBkColor(himl, CLR_NONE);
 
-    struct { int id, icon; const WCHAR *text; } btns[] = {
-        { IDT_ADDFILES, IDI_TB_ADDFILE, L"添加文件（Ctrl+A）" },
-        { IDT_ADDDIR,   IDI_TB_ADDDIR,  L"添加目录（Ctrl+D）" },
-        { IDT_REMOVE,   IDI_TB_REMOVE,  L"移除所选（Del）" },
-        { IDT_START,    IDI_TB_START,   L"开始改名（F5）" },
+    /* V1.4.1 起按钮只显示图标，名称与快捷键移到鼠标提示里 */
+    struct { int id, icon; } btns[] = {
+        { IDT_ADDFILES, IDI_TB_ADDFILE },
+        { IDT_ADDDIR,   IDI_TB_ADDDIR  },
+        { IDT_REMOVE,   IDI_TB_REMOVE  },
+        { IDT_START,    IDI_TB_START   },
     };
     for (int i = 0; i < 4; i++) {
         HICON ic = (HICON)LoadImageW(g_hInst, MAKEINTRESOURCEW(btns[i].icon),
@@ -1143,10 +1143,21 @@ static void CreateToolbar(HWND h)
         tbb.idCommand = btns[i].id;
         tbb.fsState = TBSTATE_ENABLED;
         tbb.fsStyle = TBSTYLE_BUTTON;
-        tbb.iString = (INT_PTR)SendMessageW(g_hTB, TB_ADDSTRINGW, 0, (LPARAM)btns[i].text);
         SendMessageW(g_hTB, TB_INSERTBUTTONW, i + (i >= 3 ? 1 : 0), (LPARAM)&tbb);
     }
     SendMessageW(g_hTB, TB_AUTOSIZE, 0, 0);
+}
+
+/* 工具栏按钮的提示文字：名称＋快捷键（TTN_GETDISPINFOW 里按按钮 ID 返回） */
+static const WCHAR *ToolbarTip(int id)
+{
+    switch (id) {
+    case IDT_ADDFILES: return L"添加文件（Ctrl+A）";
+    case IDT_ADDDIR:   return L"添加目录（Ctrl+D）";
+    case IDT_REMOVE:   return L"移除所选（Del）";
+    case IDT_START:    return L"开始改名（F5）";
+    }
+    return L"";
 }
 
 static void CreateMainControls(HWND h)
@@ -1196,7 +1207,7 @@ static void CreateMainControls(HWND h)
     g_hLblExt     = MakeCtl(L"STATIC", L"新扩展名：", SS_LEFT, 0, IDC_LBL_EXT, h);
     g_hEdtExt     = MakeCtl(L"EDIT", L"", WS_BORDER | ES_AUTOHSCROLL, WS_EX_CLIENTEDGE, IDC_EDT_EXT, h);
     g_hLblExtWarn = MakeCtl(L"STATIC",
-                            L"注意：只修改文件名，不改变文件内容，重要文件请先备份。",
+                            L"※注意：只修改文件名，不改变文件内容，重要文件请先备份。",
                             SS_LEFT, 0, IDC_LBL_EXTWARN, h);
 
     g_hRadUpper  = MakeCtl(L"BUTTON", L"全部大写", BS_AUTORADIOBUTTON | WS_GROUP, 0, IDC_RAD_UPPER, h);
@@ -1214,7 +1225,8 @@ static void CreateMainControls(HWND h)
                               WS_CHILD | WS_VISIBLE | LVS_REPORT | LVS_SHOWSELALWAYS,
                               0, 0, 10, 10, h, (HMENU)IDC_LIST, g_hInst, NULL);
     SetCtlFont(g_hList);
-    ListView_SetExtendedListViewStyle(g_hList, LVS_EX_GRIDLINES | LVS_EX_LABELTIP);
+    ListView_SetExtendedListViewStyle(g_hList, LVS_EX_GRIDLINES | LVS_EX_LABELTIP |
+                                               LVS_EX_FULLROWSELECT);
 
     LVCOLUMNW col;
     ZeroMemory(&col, sizeof(col));
@@ -1257,15 +1269,18 @@ static void LayoutParams(void)
     MapWindowPoints(NULL, g_hMain, (LPPOINT)&rc, 2);
 
     int x = rc.left + S(12), y = rc.top + S(24);
-    int lw = S(66), ew = S(170), rh = S(26);
+    int lw = S(70), ew = S(170), rh = S(28);
 
     HideAllParams();
 
-    /* 方案行：所有改名方式都用得到 */
+    /* 方案行：所有改名方式都用得到。“保存方案/删除”两个按钮
+       贴着分组框右边缘排，分组框变宽时按钮跟着走 */
     SetWindowPos(g_hLblPreset, NULL, x, y + S(3), S(44), S(18), SWP_NOZORDER);
     SetWindowPos(g_hCmbPreset, NULL, x + S(46), y, S(120), S(200), SWP_NOZORDER);
-    SetWindowPos(g_hBtnSavePreset, NULL, x + S(172), y - S(1), S(92), S(24), SWP_NOZORDER);
-    SetWindowPos(g_hBtnDelPreset, NULL, x + S(268), y - S(1), S(60), S(24), SWP_NOZORDER);
+    int btnR = rc.right - S(12);
+    SetWindowPos(g_hBtnDelPreset, NULL, btnR - S(60), y - S(1), S(60), S(24), SWP_NOZORDER);
+    SetWindowPos(g_hBtnSavePreset, NULL, btnR - S(60) - S(6) - S(92), y - S(1), S(92), S(24),
+                 SWP_NOZORDER);
     ShowWindow(g_hLblPreset, SW_SHOW);
     ShowWindow(g_hCmbPreset, SW_SHOW);
     ShowWindow(g_hBtnSavePreset, SW_SHOW);
@@ -1279,10 +1294,10 @@ static void LayoutParams(void)
         SetWindowTextW(g_hLblP1, g_mode == MODE_ALL ? L"名称：" : L"前缀：");
         SetWindowPos(g_hLblP1, NULL, x, y2 + S(3), lw, S(18), SWP_NOZORDER);
         SetWindowPos(g_hEdtP1, NULL, x + lw, y2, ew, S(22), SWP_NOZORDER);
-        SetWindowPos(g_hLblStart, NULL, x, y2 + rh + S(3), S(70), S(18), SWP_NOZORDER);
-        SetWindowPos(g_hEdtStart, NULL, x + S(74), y2 + rh, S(60), S(22), SWP_NOZORDER);
-        SetWindowPos(g_hLblWidth, NULL, x + S(150), y2 + rh + S(3), S(70), S(18), SWP_NOZORDER);
-        SetWindowPos(g_hCmbWidth, NULL, x + S(222), y2 + rh, S(60), S(200), SWP_NOZORDER);
+        SetWindowPos(g_hLblStart, NULL, x, y2 + rh + S(3), lw, S(18), SWP_NOZORDER);
+        SetWindowPos(g_hEdtStart, NULL, x + lw, y2 + rh, S(60), S(22), SWP_NOZORDER);
+        SetWindowPos(g_hLblWidth, NULL, x + lw + S(80), y2 + rh + S(3), lw, S(18), SWP_NOZORDER);
+        SetWindowPos(g_hCmbWidth, NULL, x + lw + S(152), y2 + rh, S(60), S(200), SWP_NOZORDER);
         ShowWindow(g_hLblP1, SW_SHOW); ShowWindow(g_hEdtP1, SW_SHOW);
         ShowWindow(g_hLblStart, SW_SHOW); ShowWindow(g_hEdtStart, SW_SHOW);
         ShowWindow(g_hLblWidth, SW_SHOW); ShowWindow(g_hCmbWidth, SW_SHOW);
@@ -1297,10 +1312,10 @@ static void LayoutParams(void)
         ShowWindow(g_hLblSuffix, SW_SHOW); ShowWindow(g_hEdtSuffix, SW_SHOW);
         break;
     case MODE_REPLACE:
-        SetWindowPos(g_hLblFind, NULL, x, y2 + S(3), S(70), S(18), SWP_NOZORDER);
-        SetWindowPos(g_hEdtFind, NULL, x + S(74), y2, ew, S(22), SWP_NOZORDER);
-        SetWindowPos(g_hLblRepl, NULL, x, y2 + rh + S(3), S(70), S(18), SWP_NOZORDER);
-        SetWindowPos(g_hEdtRepl, NULL, x + S(74), y2 + rh, ew, S(22), SWP_NOZORDER);
+        SetWindowPos(g_hLblFind, NULL, x, y2 + S(3), lw, S(18), SWP_NOZORDER);
+        SetWindowPos(g_hEdtFind, NULL, x + lw, y2, ew, S(22), SWP_NOZORDER);
+        SetWindowPos(g_hLblRepl, NULL, x, y2 + rh + S(3), lw, S(18), SWP_NOZORDER);
+        SetWindowPos(g_hEdtRepl, NULL, x + lw, y2 + rh, ew, S(22), SWP_NOZORDER);
         SetWindowPos(g_hChkCase, NULL, x, y2 + rh * 2 + S(2), S(120), S(20), SWP_NOZORDER);
         SetWindowPos(g_hChkRegex, NULL, x + S(130), y2 + rh * 2 + S(2), S(130), S(20), SWP_NOZORDER);
         ShowWindow(g_hLblFind, SW_SHOW); ShowWindow(g_hEdtFind, SW_SHOW);
@@ -1308,9 +1323,10 @@ static void LayoutParams(void)
         ShowWindow(g_hChkCase, SW_SHOW); ShowWindow(g_hChkRegex, SW_SHOW);
         break;
     case MODE_EXT:
-        SetWindowPos(g_hLblExt, NULL, x, y2 + S(3), S(70), S(18), SWP_NOZORDER);
-        SetWindowPos(g_hEdtExt, NULL, x + S(74), y2, S(90), S(22), SWP_NOZORDER);
-        SetWindowPos(g_hLblExtWarn, NULL, x, y2 + rh + S(4), rc.right - rc.left - S(24), S(36), SWP_NOZORDER);
+        SetWindowPos(g_hLblExt, NULL, x, y2 + S(3), lw, S(18), SWP_NOZORDER);
+        SetWindowPos(g_hEdtExt, NULL, x + lw, y2, S(90), S(22), SWP_NOZORDER);
+        SetWindowPos(g_hLblExtWarn, NULL, x, y2 + rh + S(4),
+                     rc.right - S(12) - x, S(18), SWP_NOZORDER);
         ShowWindow(g_hLblExt, SW_SHOW); ShowWindow(g_hEdtExt, SW_SHOW);
         ShowWindow(g_hLblExtWarn, SW_SHOW);
         break;
@@ -1323,15 +1339,16 @@ static void LayoutParams(void)
         break;
     case MODE_DATE:
         SetWindowTextW(g_hLblP1, L"前缀：");
-        SetWindowPos(g_hLblP1, NULL, x, y2 + S(3), S(70), S(18), SWP_NOZORDER);
-        SetWindowPos(g_hEdtP1, NULL, x + S(74), y2, ew, S(22), SWP_NOZORDER);
-        SetWindowPos(g_hLblStart, NULL, x, y2 + rh + S(3), S(70), S(18), SWP_NOZORDER);
-        SetWindowPos(g_hEdtStart, NULL, x + S(74), y2 + rh, S(60), S(22), SWP_NOZORDER);
-        SetWindowPos(g_hLblWidth, NULL, x + S(150), y2 + rh + S(3), S(70), S(18), SWP_NOZORDER);
-        SetWindowPos(g_hCmbWidth, NULL, x + S(222), y2 + rh, S(60), S(200), SWP_NOZORDER);
-        SetWindowPos(g_hLblDate, NULL, x, y2 + rh * 2 + S(3), S(70), S(18), SWP_NOZORDER);
-        SetWindowPos(g_hEdtDate, NULL, x + S(74), y2 + rh * 2, S(100), S(22), SWP_NOZORDER);
-        SetWindowPos(g_hLblDateHint, NULL, x + S(180), y2 + rh * 2 + S(3), S(260), S(18), SWP_NOZORDER);
+        SetWindowPos(g_hLblP1, NULL, x, y2 + S(3), lw, S(18), SWP_NOZORDER);
+        SetWindowPos(g_hEdtP1, NULL, x + lw, y2, ew, S(22), SWP_NOZORDER);
+        SetWindowPos(g_hLblStart, NULL, x, y2 + rh + S(3), lw, S(18), SWP_NOZORDER);
+        SetWindowPos(g_hEdtStart, NULL, x + lw, y2 + rh, S(60), S(22), SWP_NOZORDER);
+        SetWindowPos(g_hLblWidth, NULL, x + lw + S(80), y2 + rh + S(3), lw, S(18), SWP_NOZORDER);
+        SetWindowPos(g_hCmbWidth, NULL, x + lw + S(152), y2 + rh, S(60), S(200), SWP_NOZORDER);
+        SetWindowPos(g_hLblDate, NULL, x, y2 + rh * 2 + S(3), lw, S(18), SWP_NOZORDER);
+        SetWindowPos(g_hEdtDate, NULL, x + lw, y2 + rh * 2, S(100), S(22), SWP_NOZORDER);
+        SetWindowPos(g_hLblDateHint, NULL, x + lw + S(110), y2 + rh * 2 + S(3),
+                     rc.right - S(12) - (x + lw + S(110)), S(18), SWP_NOZORDER);
         ShowWindow(g_hLblP1, SW_SHOW); ShowWindow(g_hEdtP1, SW_SHOW);
         ShowWindow(g_hLblStart, SW_SHOW); ShowWindow(g_hEdtStart, SW_SHOW);
         ShowWindow(g_hLblWidth, SW_SHOW); ShowWindow(g_hCmbWidth, SW_SHOW);
@@ -1355,17 +1372,17 @@ static void DoLayout(void)
     GetWindowRect(g_hStatus, &rs);
     int top = rt.bottom - rt.top;
     int statusH = rs.bottom - rs.top;
-    int pad = S(6);
+    int pad = S(8);
 
-    int blockH = S(150);
-    SetWindowPos(g_hGrpMode, NULL, pad, top + pad, S(132), blockH, SWP_NOZORDER);
+    int blockH = S(160);
+    SetWindowPos(g_hGrpMode, NULL, pad, top + pad, S(140), blockH, SWP_NOZORDER);
     int i;
     for (i = 0; i < MODE_COUNT; i++)
-        SetWindowPos(g_hRadMode[i], NULL, pad + S(10), top + pad + S(20) + i * S(18),
-                     S(112), S(18), SWP_NOZORDER);
+        SetWindowPos(g_hRadMode[i], NULL, pad + S(10), top + pad + S(20) + i * S(20),
+                     S(120), S(18), SWP_NOZORDER);
 
-    SetWindowPos(g_hGrpParam, NULL, pad + S(138), top + pad,
-                 W - (pad + S(138)) - pad, blockH, SWP_NOZORDER);
+    SetWindowPos(g_hGrpParam, NULL, pad + S(148), top + pad,
+                 W - (pad + S(148)) - pad, blockH, SWP_NOZORDER);
     LayoutParams();
 
     int listY = top + pad + blockH + pad;
@@ -1373,10 +1390,10 @@ static void DoLayout(void)
     if (listH < S(60)) listH = S(60);
     SetWindowPos(g_hList, NULL, pad, listY, W - pad * 2, listH, SWP_NOZORDER);
 
-    /* 状态栏分栏 */
+    /* 状态栏分栏：按窗口宽度比例计算，缩小窗口时三栏也不重叠 */
     int parts[3];
-    parts[0] = W - S(300);
-    parts[1] = W - S(150);
+    parts[0] = W - S(320);
+    parts[1] = W - S(160);
     parts[2] = -1;
     SendMessageW(g_hStatus, SB_SETPARTS, 3, (LPARAM)parts);
 }
@@ -1807,8 +1824,8 @@ static LRESULT CALLBACK MainProc(HWND h, UINT m, WPARAM w, LPARAM l)
 
     case WM_GETMINMAXINFO: {
         MINMAXINFO *mmi = (MINMAXINFO *)l;
-        mmi->ptMinTrackSize.x = S(620);
-        mmi->ptMinTrackSize.y = S(420);
+        mmi->ptMinTrackSize.x = S(800);
+        mmi->ptMinTrackSize.y = S(600);
         return 0;
     }
 
@@ -1818,6 +1835,17 @@ static LRESULT CALLBACK MainProc(HWND h, UINT m, WPARAM w, LPARAM l)
 
     case WM_NOTIFY: {
         LPNMHDR nh = (LPNMHDR)l;
+        /* 工具栏按钮的鼠标提示：按钮 ID 在 di->hdr.idFrom 里，
+           按 ID 返回“名称＋快捷键” */
+        if (nh->code == TTN_GETDISPINFOW) {
+            LPNMTTDISPINFOW di = (LPNMTTDISPINFOW)l;
+            const WCHAR *tip = ToolbarTip((int)di->hdr.idFrom);
+            if (tip[0]) {
+                di->lpszText = (LPWSTR)tip;
+                di->hinst = NULL;
+            }
+            return 0;
+        }
         if (nh->idFrom == IDC_LIST) {
             if (nh->code == LVN_COLUMNCLICK) {
                 LPNMLISTVIEW nv = (LPNMLISTVIEW)l;
@@ -1927,7 +1955,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE hPrev, LPWSTR cmd, int show)
     wc.lpszMenuName = NULL;
     if (!RegisterClassExW(&wc)) return 1;
 
-    int W = S(760), H = S(540);
+    int W = S(840), H = S(620);
     HWND hwnd = CreateWindowExW(0, L"XYRenameMain", APP_TITLE,
                                 WS_OVERLAPPEDWINDOW,
                                 CW_USEDEFAULT, CW_USEDEFAULT, W, H,
@@ -1943,8 +1971,8 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE hPrev, LPWSTR cmd, int show)
             int y = GetPrivateProfileIntW(L"Window", L"Y", 0, ini);
             int cw = GetPrivateProfileIntW(L"Window", L"W", W, ini);
             int ch = GetPrivateProfileIntW(L"Window", L"H", H, ini);
-            if (cw < S(620)) cw = W;
-            if (ch < S(420)) ch = H;
+            if (cw < S(800)) cw = W;
+            if (ch < S(600)) ch = H;
             SetWindowPos(hwnd, NULL, x, y, cw, ch, SWP_NOZORDER);
         }
     }

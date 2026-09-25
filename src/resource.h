@@ -1,4 +1,4 @@
-/* resource.h — 小雨超级文件批量改名专家 V1.1 资源编号定义 */
+/* resource.h — 小雨超级文件批量改名专家 V1.4.1 资源编号定义 */
 #ifndef XYRESOURCE_H
 #define XYRESOURCE_H
 

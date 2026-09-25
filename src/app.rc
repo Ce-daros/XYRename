@@ -1,4 +1,4 @@
-/* app.rc — 小雨超级文件批量改名专家 V1.1 资源脚本
+/* app.rc — 小雨超级文件批量改名专家 V1.4.1 资源脚本
    说明：本文件是 UTF-8 中文，build.bat 调用 windres 时带
          --codepage=65001，中文不会乱码。 */
 #include <windows.h>
@@ -23,8 +23,8 @@ IDI_HELP           ICON  "help.ico"
 
 /* ── 版本信息（右键属性里看到的内容）──────────────────────── */
 VS_VERSION_INFO VERSIONINFO
- FILEVERSION    1,1,0,0
- PRODUCTVERSION 1,1,0,0
+ FILEVERSION    1,4,1,0
+ PRODUCTVERSION 1,4,1,0
  FILEFLAGSMASK  VS_FFI_FILEFLAGSMASK
  FILEFLAGS      0
  FILEOS         VOS__WINDOWS32
@@ -37,12 +37,12 @@ BEGIN
         BEGIN
             VALUE "CompanyName",      "小雨软件工作室"
             VALUE "FileDescription",  "小雨超级文件批量改名专家"
-            VALUE "FileVersion",      "1.1.0.0"
+            VALUE "FileVersion",      "1.4.1.0"
             VALUE "InternalName",     "XYRename"
             VALUE "LegalCopyright",   "版权所有 (C) 2007 小雨软件工作室"
             VALUE "OriginalFilename", "XYRename.exe"
             VALUE "ProductName",      "小雨超级文件批量改名专家"
-            VALUE "ProductVersion",   "V1.1 正式版"
+            VALUE "ProductVersion",   "V1.4.1 正式版"
             VALUE "Comments",         "免费软件，欢迎传播。主页：angelkawaii.xyz"
         END
     END

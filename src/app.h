@@ -4,9 +4,9 @@
 
 #include <windows.h>
 
-#define APP_TITLE    L"小雨超级文件批量改名专家 V1.1 正式版"
+#define APP_TITLE    L"小雨超级文件批量改名专家 V1.4.1 正式版"
 #define APP_NAME     L"小雨超级文件批量改名专家"
-#define APP_VER      L"V1.1 正式版"
+#define APP_VER      L"V1.4.1 正式版"
 
 /* 改名方式 */
 enum {
