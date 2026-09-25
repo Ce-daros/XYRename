@@ -265,8 +265,33 @@ static void RebuildIndex(void)
 }
 
 /* ─────────────────────────── 打印 ─────────────────────────── */
+/* 打印前先检查默认打印机：GetDefaultPrinterW 在 XP 上已有，
+ * 但按本项目的惯例从 winspool.drv 动态加载，老系统缺函数时不至于链接失败 */
+static BOOL HasDefaultPrinter(void)
+{
+    typedef BOOL (WINAPI *GetDefaultPrinterW_t)(LPWSTR, LPDWORD);
+    HMODULE sp = LoadLibraryW(L"winspool.drv");
+    if (!sp) return FALSE;
+    GetDefaultPrinterW_t fn = (GetDefaultPrinterW_t)GetProcAddress(sp, "GetDefaultPrinterW");
+    if (!fn) { FreeLibrary(sp); return FALSE; }
+    WCHAR name[MAX_PATH];
+    DWORD len = MAX_PATH;
+    BOOL ok = fn(name, &len);
+    FreeLibrary(sp);
+    return ok;
+}
+
 static void DoPrint(void)
 {
+    if (!HasDefaultPrinter()) {
+        MessageBoxW(g_hHelp,
+                    L"没有安装打印机，或者默认打印机不可用，无法打印帮助。\n\n"
+                    L"解决办法：请在 Windows 的“打印机和传真”中安装打印机，"
+                    L"或将某台打印机设为默认打印机后再试。",
+                    APP_NAME, MB_OK | MB_ICONWARNING);
+        return;
+    }
+
     PRINTDLGW pd;
     ZeroMemory(&pd, sizeof(pd));
     pd.lStructSize = sizeof(pd);
